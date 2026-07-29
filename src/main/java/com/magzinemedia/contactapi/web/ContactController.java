@@ -35,6 +35,7 @@ public class ContactController {
 
         ContactSubmission saved = repository.save(submission);
         emailNotificationService.notifyNewContact(saved);
+        emailNotificationService.sendCustomerAcknowledgement(saved);
 
         return ResponseEntity.status(HttpStatus.CREATED)
             .body(Map.of("ok", true, "id", saved.getId()));
