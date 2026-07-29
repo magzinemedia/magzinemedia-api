@@ -1,53 +1,54 @@
 package com.magzinemedia.contactapi.web;
 
 import com.magzinemedia.contactapi.model.ContactSubmission;
-import jakarta.mail.internet.MimeMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.mail.SimpleMailMessage;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClient;
 import org.springframework.web.util.HtmlUtils;
+
+import java.util.List;
+import java.util.Map;
 
 @Service
 public class EmailNotificationService {
 
     private static final Logger log = LoggerFactory.getLogger(EmailNotificationService.class);
+    private static final String BREVO_ENDPOINT = "https://api.brevo.com/v3/smtp/email";
 
-    private final JavaMailSender mailSender;
+    private final RestClient restClient;
     private final boolean enabled;
+    private final String apiKey;
     private final String notifyTo;
     private final String fromAddress;
+    private final String fromName;
 
     public EmailNotificationService(
-        JavaMailSender mailSender,
         @Value("${app.mail.enabled:false}") boolean enabled,
+        @Value("${app.brevo.api-key:}") String apiKey,
         @Value("${app.mail.notify-to:}") String notifyTo,
-        @Value("${spring.mail.username:}") String fromAddress
+        @Value("${app.mail.from-address:}") String fromAddress,
+        @Value("${app.mail.from-name:Magzine Media}") String fromName
     ) {
-        this.mailSender = mailSender;
+        this.restClient = RestClient.create();
         this.enabled = enabled;
+        this.apiKey = apiKey;
         this.notifyTo = notifyTo;
         this.fromAddress = fromAddress;
+        this.fromName = fromName;
     }
 
     @Async
     public void notifyNewContact(ContactSubmission submission) {
-        if (!enabled || notifyTo.isBlank() || fromAddress.isBlank()) {
+        if (!isConfigured() || notifyTo.isBlank()) {
             log.info("Email notifications not configured; skipping admin email for submission {}", submission.getId());
             return;
         }
 
         try {
-            SimpleMailMessage message = new SimpleMailMessage();
-            message.setFrom(fromAddress);
-            message.setTo(notifyTo);
-            message.setSubject("New contact inquiry from " + submission.getName());
-            message.setText(buildAdminBody(submission));
-            mailSender.send(message);
+            send(notifyTo, "New contact inquiry from " + submission.getName(), buildAdminText(submission), false);
             log.info("Sent admin notification email for submission {}", submission.getId());
         } catch (Exception e) {
             log.error("Failed to send admin notification email for submission {}", submission.getId(), e);
@@ -56,26 +57,42 @@ public class EmailNotificationService {
 
     @Async
     public void sendCustomerAcknowledgement(ContactSubmission submission) {
-        if (!enabled || fromAddress.isBlank() || submission.getEmail() == null || submission.getEmail().isBlank()) {
+        if (!isConfigured() || submission.getEmail() == null || submission.getEmail().isBlank()) {
             log.info("Email notifications not configured; skipping acknowledgement email for submission {}", submission.getId());
             return;
         }
 
         try {
-            MimeMessage mimeMessage = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(mimeMessage, false, "UTF-8");
-            helper.setFrom(fromAddress, "Magzine Media");
-            helper.setTo(submission.getEmail());
-            helper.setSubject("We've received your inquiry - Magzine Media");
-            helper.setText(buildAcknowledgementHtml(submission), true);
-            mailSender.send(mimeMessage);
+            send(submission.getEmail(), "We've received your inquiry - Magzine Media", buildAcknowledgementHtml(submission), true);
             log.info("Sent acknowledgement email to {} for submission {}", submission.getEmail(), submission.getId());
         } catch (Exception e) {
             log.error("Failed to send acknowledgement email for submission {}", submission.getId(), e);
         }
     }
 
-    private String buildAdminBody(ContactSubmission submission) {
+    private boolean isConfigured() {
+        return enabled && !apiKey.isBlank() && !fromAddress.isBlank();
+    }
+
+    private void send(String to, String subject, String content, boolean isHtml) {
+        Map<String, Object> body = Map.of(
+            "sender", Map.of("name", fromName, "email", fromAddress),
+            "to", List.of(Map.of("email", to)),
+            "subject", subject,
+            isHtml ? "htmlContent" : "textContent", content
+        );
+
+        restClient.post()
+            .uri(BREVO_ENDPOINT)
+            .header("api-key", apiKey)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(body)
+            .retrieve()
+            .toBodilessEntity();
+    }
+
+    private String buildAdminText(ContactSubmission submission) {
         return "New inquiry received on Magzine Media\n\n"
             + "Name: " + submission.getName() + "\n"
             + "Email: " + submission.getEmail() + "\n"
