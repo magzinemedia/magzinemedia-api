@@ -15,9 +15,11 @@ import java.util.Map;
 public class ContactController {
 
     private final ContactSubmissionRepository repository;
+    private final EmailNotificationService emailNotificationService;
 
-    public ContactController(ContactSubmissionRepository repository) {
+    public ContactController(ContactSubmissionRepository repository, EmailNotificationService emailNotificationService) {
         this.repository = repository;
+        this.emailNotificationService = emailNotificationService;
     }
 
     @PostMapping("/api/contact")
@@ -32,6 +34,7 @@ public class ContactController {
         submission.setNotes(request.getNotes());
 
         ContactSubmission saved = repository.save(submission);
+        emailNotificationService.notifyNewContact(saved);
 
         return ResponseEntity.status(HttpStatus.CREATED)
             .body(Map.of("ok", true, "id", saved.getId()));
