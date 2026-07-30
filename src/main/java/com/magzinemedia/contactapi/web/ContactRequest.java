@@ -12,12 +12,15 @@ public class ContactRequest {
     @Email
     private String email;
 
+    @NotBlank
     private String mobile;
 
+    @NotBlank
     private String countryCode;
 
     private String fullPhone;
 
+    @NotBlank
     private String company;
 
     private String notes;

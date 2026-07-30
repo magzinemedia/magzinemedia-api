@@ -13,7 +13,7 @@ import java.util.Date;
 @Component
 public class JwtService {
 
-    private static final long EXPIRATION_MS = 1000L * 60 * 60 * 12;
+    private static final long EXPIRATION_MS = 1000L * 60 * 30;
 
     private final SecretKey key;
 
