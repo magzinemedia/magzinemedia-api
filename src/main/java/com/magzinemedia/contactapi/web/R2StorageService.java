@@ -1,7 +1,11 @@
 package com.magzinemedia.contactapi.web;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequest;
@@ -13,15 +17,20 @@ import java.util.UUID;
 @Service
 public class R2StorageService {
 
+    private static final Logger log = LoggerFactory.getLogger(R2StorageService.class);
+
+    private final S3Client s3Client;
     private final S3Presigner presigner;
     private final String bucket;
     private final String publicBaseUrl;
 
     public R2StorageService(
+        S3Client s3Client,
         S3Presigner presigner,
         @Value("${app.r2.bucket}") String bucket,
         @Value("${app.r2.public-base-url}") String publicBaseUrl
     ) {
+        this.s3Client = s3Client;
         this.presigner = presigner;
         this.bucket = bucket;
         this.publicBaseUrl = publicBaseUrl;
@@ -47,6 +56,21 @@ public class R2StorageService {
         PresignedPutObjectRequest presigned = presigner.presignPutObject(presignRequest);
 
         return new PresignedUpload(presigned.url().toString(), publicBaseUrl + "/" + key);
+    }
+
+    public void deleteByPublicUrl(String publicUrl) {
+        String prefix = publicBaseUrl + "/";
+        if (publicUrl == null || !publicUrl.startsWith(prefix)) {
+            return;
+        }
+
+        String key = publicUrl.substring(prefix.length());
+
+        try {
+            s3Client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+        } catch (Exception e) {
+            log.warn("Failed to delete R2 object '{}': {}", key, e.getMessage());
+        }
     }
 
     public record PresignedUpload(String uploadUrl, String publicUrl) {

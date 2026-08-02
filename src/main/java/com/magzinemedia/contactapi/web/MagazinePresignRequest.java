@@ -1,19 +1,13 @@
 package com.magzinemedia.contactapi.web;
 
-import jakarta.validation.constraints.NotBlank;
-
 public class MagazinePresignRequest {
 
-    @NotBlank
     private String coverFileName;
 
-    @NotBlank
     private String coverContentType;
 
-    @NotBlank
     private String pdfFileName;
 
-    @NotBlank
     private String pdfContentType;
 
     public String getCoverFileName() {
