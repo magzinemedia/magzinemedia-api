@@ -6,6 +6,7 @@ import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -48,7 +49,7 @@ public class Magazine {
     @Column(nullable = false)
     private Status status = Status.PROCESSING;
 
-    @ElementCollection
+    @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "magazine_page_images", joinColumns = @JoinColumn(name = "magazine_id"))
     @OrderColumn(name = "page_index")
     @Column(name = "image_url")
