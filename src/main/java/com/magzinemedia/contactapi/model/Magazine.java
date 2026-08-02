@@ -1,18 +1,32 @@
 package com.magzinemedia.contactapi.model;
 
+import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
+import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.OrderColumn;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "magazines")
 public class Magazine {
+
+    public enum Status {
+        PROCESSING,
+        READY,
+        FAILED
+    }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -29,6 +43,16 @@ public class Magazine {
 
     @Column(nullable = false)
     private String pdfUrl;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Status status = Status.PROCESSING;
+
+    @ElementCollection
+    @CollectionTable(name = "magazine_page_images", joinColumns = @JoinColumn(name = "magazine_id"))
+    @OrderColumn(name = "page_index")
+    @Column(name = "image_url")
+    private List<String> pageImageUrls = new ArrayList<>();
 
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
@@ -76,6 +100,22 @@ public class Magazine {
 
     public void setPdfUrl(String pdfUrl) {
         this.pdfUrl = pdfUrl;
+    }
+
+    public Status getStatus() {
+        return status;
+    }
+
+    public void setStatus(Status status) {
+        this.status = status;
+    }
+
+    public List<String> getPageImageUrls() {
+        return pageImageUrls;
+    }
+
+    public void setPageImageUrls(List<String> pageImageUrls) {
+        this.pageImageUrls = pageImageUrls;
     }
 
     public Instant getCreatedAt() {

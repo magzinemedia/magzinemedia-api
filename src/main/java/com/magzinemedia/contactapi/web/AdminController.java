@@ -29,15 +29,18 @@ public class AdminController {
     private final ContactSubmissionRepository repository;
     private final MagazineRepository magazineRepository;
     private final R2StorageService r2StorageService;
+    private final MagazineProcessingService magazineProcessingService;
 
     public AdminController(
         ContactSubmissionRepository repository,
         MagazineRepository magazineRepository,
-        R2StorageService r2StorageService
+        R2StorageService r2StorageService,
+        MagazineProcessingService magazineProcessingService
     ) {
         this.repository = repository;
         this.magazineRepository = magazineRepository;
         this.r2StorageService = r2StorageService;
+        this.magazineProcessingService = magazineProcessingService;
     }
 
     @GetMapping("/contacts")
@@ -73,7 +76,11 @@ public class AdminController {
         magazine.setDescription(request.getDescription());
         magazine.setCoverImageUrl(request.getCoverImageUrl());
         magazine.setPdfUrl(request.getPdfUrl());
-        return magazineRepository.save(magazine);
+        magazine.setStatus(Magazine.Status.PROCESSING);
+
+        Magazine saved = magazineRepository.save(magazine);
+        magazineProcessingService.processMagazine(saved.getId());
+        return saved;
     }
 
     @PutMapping("/magazines/{id}")
@@ -81,11 +88,24 @@ public class AdminController {
         Magazine magazine = magazineRepository.findById(id)
             .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Magazine not found"));
 
+        boolean pdfChanged = !request.getPdfUrl().equals(magazine.getPdfUrl());
+
         magazine.setTitle(request.getTitle());
         magazine.setDescription(request.getDescription());
         magazine.setCoverImageUrl(request.getCoverImageUrl());
         magazine.setPdfUrl(request.getPdfUrl());
-        return magazineRepository.save(magazine);
+
+        if (pdfChanged) {
+            magazine.setStatus(Magazine.Status.PROCESSING);
+        }
+
+        Magazine saved = magazineRepository.save(magazine);
+
+        if (pdfChanged) {
+            magazineProcessingService.processMagazine(saved.getId());
+        }
+
+        return saved;
     }
 
     @DeleteMapping("/magazines/{id}")
@@ -95,6 +115,7 @@ public class AdminController {
 
         r2StorageService.deleteByPublicUrl(magazine.getCoverImageUrl());
         r2StorageService.deleteByPublicUrl(magazine.getPdfUrl());
+        magazine.getPageImageUrls().forEach(r2StorageService::deleteByPublicUrl);
         magazineRepository.delete(magazine);
 
         return ResponseEntity.noContent().build();

@@ -4,8 +4,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequest;
@@ -59,18 +63,44 @@ public class R2StorageService {
     }
 
     public void deleteByPublicUrl(String publicUrl) {
-        String prefix = publicBaseUrl + "/";
-        if (publicUrl == null || !publicUrl.startsWith(prefix)) {
+        String key = keyFromPublicUrl(publicUrl);
+        if (key == null) {
             return;
         }
-
-        String key = publicUrl.substring(prefix.length());
 
         try {
             s3Client.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
         } catch (Exception e) {
             log.warn("Failed to delete R2 object '{}': {}", key, e.getMessage());
         }
+    }
+
+    public byte[] download(String publicUrl) {
+        String key = keyFromPublicUrl(publicUrl);
+        if (key == null) {
+            throw new IllegalArgumentException("URL is not an R2 object: " + publicUrl);
+        }
+
+        ResponseBytes<GetObjectResponse> response = s3Client.getObjectAsBytes(
+            GetObjectRequest.builder().bucket(bucket).key(key).build()
+        );
+        return response.asByteArray();
+    }
+
+    public String uploadBytes(String key, byte[] data, String contentType) {
+        s3Client.putObject(
+            PutObjectRequest.builder().bucket(bucket).key(key).contentType(contentType).build(),
+            RequestBody.fromBytes(data)
+        );
+        return publicBaseUrl + "/" + key;
+    }
+
+    private String keyFromPublicUrl(String publicUrl) {
+        String prefix = publicBaseUrl + "/";
+        if (publicUrl == null || !publicUrl.startsWith(prefix)) {
+            return null;
+        }
+        return publicUrl.substring(prefix.length());
     }
 
     public record PresignedUpload(String uploadUrl, String publicUrl) {
