@@ -18,6 +18,9 @@ import javax.imageio.ImageWriter;
 import javax.imageio.stream.ImageOutputStream;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -32,8 +35,11 @@ import java.util.concurrent.TimeoutException;
 public class MagazineProcessingService {
 
     private static final Logger log = LoggerFactory.getLogger(MagazineProcessingService.class);
-    private static final float DPI = 200f;
-    private static final float JPEG_QUALITY = 0.9f;
+    // Trimmed down from 200 — Render's free tier has very little heap, and
+    // rendering happens one page at a time anyway so this is a straight
+    // safety margin against the OutOfMemoryError observed at 200 DPI.
+    private static final float DPI = 150f;
+    private static final float JPEG_QUALITY = 0.85f;
     // Bounds a single page's render time. Client-side pdf.js was observed
     // (this session, live testing) to hang indefinitely on certain page
     // content in a real magazine PDF — PDFBox could plausibly hit the same
@@ -57,26 +63,43 @@ public class MagazineProcessingService {
         }
         Magazine magazine = maybeMagazine.get();
 
+        Path tempFile = null;
         try {
-            byte[] pdfBytes = r2StorageService.download(magazine.getPdfUrl());
-            List<String> pageImageUrls = renderPagesToR2(magazineId, pdfBytes);
+            tempFile = Files.createTempFile("magazine-" + magazineId + "-", ".pdf");
+            // Stream to disk rather than loading into a byte[] — the source
+            // PDFs here run 30-40MB and buffering the whole thing in heap was
+            // enough to throw OutOfMemoryError on Render's free-tier memory budget.
+            r2StorageService.downloadToFile(magazine.getPdfUrl(), tempFile);
+
+            List<String> pageImageUrls = renderPagesToR2(magazineId, tempFile.toFile());
 
             magazine.setPageImageUrls(pageImageUrls);
             magazine.setStatus(Magazine.Status.READY);
             magazineRepository.save(magazine);
             log.info("Magazine {} processed successfully: {} pages", magazineId, pageImageUrls.size());
-        } catch (Exception e) {
-            log.warn("Failed to process magazine {}: {}", magazineId, e.getMessage());
+        } catch (Throwable t) {
+            // Catches Throwable, not just Exception — OutOfMemoryError is an
+            // Error, not an Exception, and previously slipped past this catch
+            // block entirely, leaving the row stuck in PROCESSING forever.
+            log.warn("Failed to process magazine {}: {}", magazineId, t.getMessage());
             magazine.setStatus(Magazine.Status.FAILED);
             magazineRepository.save(magazine);
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (Exception e) {
+                    log.warn("Failed to delete temp file {}: {}", tempFile, e.getMessage());
+                }
+            }
         }
     }
 
-    private List<String> renderPagesToR2(Long magazineId, byte[] pdfBytes) throws Exception {
+    private List<String> renderPagesToR2(Long magazineId, File pdfFile) throws Exception {
         List<String> urls = new ArrayList<>();
         ExecutorService renderExecutor = Executors.newSingleThreadExecutor();
 
-        try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+        try (PDDocument document = Loader.loadPDF(pdfFile)) {
             PDFRenderer renderer = new PDFRenderer(document);
             int pageCount = document.getNumberOfPages();
             log.info("Magazine {}: starting render of {} pages", magazineId, pageCount);

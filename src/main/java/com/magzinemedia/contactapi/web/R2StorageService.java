@@ -4,17 +4,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
-import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignRequest;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.UUID;
 
@@ -75,16 +75,22 @@ public class R2StorageService {
         }
     }
 
-    public byte[] download(String publicUrl) {
+    /**
+     * Streams the object straight to disk rather than buffering it in the JVM
+     * heap — a large PDF loaded via getObjectAsBytes() was enough to exhaust
+     * heap entirely on Render's free-tier memory budget (observed directly:
+     * an OutOfMemoryError inside the SDK's own byte-array buffering).
+     */
+    public void downloadToFile(String publicUrl, Path destination) {
         String key = keyFromPublicUrl(publicUrl);
         if (key == null) {
             throw new IllegalArgumentException("URL is not an R2 object: " + publicUrl);
         }
 
-        ResponseBytes<GetObjectResponse> response = s3Client.getObjectAsBytes(
-            GetObjectRequest.builder().bucket(bucket).key(key).build()
+        s3Client.getObject(
+            GetObjectRequest.builder().bucket(bucket).key(key).build(),
+            ResponseTransformer.toFile(destination)
         );
-        return response.asByteArray();
     }
 
     public String uploadBytes(String key, byte[] data, String contentType) {
