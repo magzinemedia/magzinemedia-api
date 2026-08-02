@@ -118,6 +118,12 @@ public class MagazineProcessingService {
                 String key = "pages/" + magazineId + "/" + (i + 1) + ".jpg";
                 urls.add(r2StorageService.uploadBytes(key, jpegBytes, "image/jpeg"));
                 log.info("Magazine {}: rendered page {}/{}", magazineId, i + 1, pageCount);
+
+                // Render's free tier gives the JVM very little heap. A page's
+                // BufferedImage can be tens of MB and the next page's render
+                // starts immediately — nudge the collector so it's reclaimed
+                // before that allocation rather than relying on GC to keep up.
+                System.gc();
             }
         } finally {
             renderExecutor.shutdownNow();
