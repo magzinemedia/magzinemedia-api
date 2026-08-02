@@ -21,6 +21,12 @@ import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Service
 public class MagazineProcessingService {
@@ -28,6 +34,12 @@ public class MagazineProcessingService {
     private static final Logger log = LoggerFactory.getLogger(MagazineProcessingService.class);
     private static final float DPI = 200f;
     private static final float JPEG_QUALITY = 0.9f;
+    // Bounds a single page's render time. Client-side pdf.js was observed
+    // (this session, live testing) to hang indefinitely on certain page
+    // content in a real magazine PDF — PDFBox could plausibly hit the same
+    // pathological content. Without a bound, one bad page leaves the
+    // magazine stuck in PROCESSING forever instead of failing visibly.
+    private static final long PAGE_RENDER_TIMEOUT_SECONDS = 45;
 
     private final MagazineRepository magazineRepository;
     private final R2StorageService r2StorageService;
@@ -52,6 +64,7 @@ public class MagazineProcessingService {
             magazine.setPageImageUrls(pageImageUrls);
             magazine.setStatus(Magazine.Status.READY);
             magazineRepository.save(magazine);
+            log.info("Magazine {} processed successfully: {} pages", magazineId, pageImageUrls.size());
         } catch (Exception e) {
             log.warn("Failed to process magazine {}: {}", magazineId, e.getMessage());
             magazine.setStatus(Magazine.Status.FAILED);
@@ -61,22 +74,47 @@ public class MagazineProcessingService {
 
     private List<String> renderPagesToR2(Long magazineId, byte[] pdfBytes) throws Exception {
         List<String> urls = new ArrayList<>();
+        ExecutorService renderExecutor = Executors.newSingleThreadExecutor();
 
         try (PDDocument document = Loader.loadPDF(pdfBytes)) {
             PDFRenderer renderer = new PDFRenderer(document);
             int pageCount = document.getNumberOfPages();
+            log.info("Magazine {}: starting render of {} pages", magazineId, pageCount);
 
             for (int i = 0; i < pageCount; i++) {
-                BufferedImage image = renderer.renderImageWithDPI(i, DPI, ImageType.RGB);
+                BufferedImage image = renderPageWithTimeout(renderExecutor, renderer, i, magazineId);
                 byte[] jpegBytes = toJpeg(image);
                 image.flush();
 
                 String key = "pages/" + magazineId + "/" + (i + 1) + ".jpg";
                 urls.add(r2StorageService.uploadBytes(key, jpegBytes, "image/jpeg"));
+                log.info("Magazine {}: rendered page {}/{}", magazineId, i + 1, pageCount);
             }
+        } finally {
+            renderExecutor.shutdownNow();
         }
 
         return urls;
+    }
+
+    private BufferedImage renderPageWithTimeout(
+        ExecutorService executor,
+        PDFRenderer renderer,
+        int pageIndex,
+        Long magazineId
+    ) throws Exception {
+        Callable<BufferedImage> renderTask = () -> renderer.renderImageWithDPI(pageIndex, DPI, ImageType.RGB);
+        Future<BufferedImage> future = executor.submit(renderTask);
+
+        try {
+            return future.get(PAGE_RENDER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new TimeoutException(
+                "Magazine " + magazineId + " page " + (pageIndex + 1) + " took longer than "
+                    + PAGE_RENDER_TIMEOUT_SECONDS + "s to render — aborting"
+            );
+        }
     }
 
     private byte[] toJpeg(BufferedImage image) throws Exception {
