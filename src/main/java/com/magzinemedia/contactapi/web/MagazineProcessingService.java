@@ -65,7 +65,12 @@ public class MagazineProcessingService {
 
         Path tempFile = null;
         try {
-            tempFile = Files.createTempFile("magazine-" + magazineId + "-", ".pdf");
+            // Build the path without creating the file — ResponseTransformer.toFile()
+            // in this SDK version always opens with CREATE_NEW and throws if the
+            // target already exists, so Files.createTempFile() (which creates it
+            // up front) made every download fail immediately.
+            tempFile = Files.createTempDirectory("magazine-" + magazineId + "-")
+                .resolve("source.pdf");
             // Stream to disk rather than loading into a byte[] — the source
             // PDFs here run 30-40MB and buffering the whole thing in heap was
             // enough to throw OutOfMemoryError on Render's free-tier memory budget.
@@ -88,6 +93,7 @@ public class MagazineProcessingService {
             if (tempFile != null) {
                 try {
                     Files.deleteIfExists(tempFile);
+                    Files.deleteIfExists(tempFile.getParent());
                 } catch (Exception e) {
                     log.warn("Failed to delete temp file {}: {}", tempFile, e.getMessage());
                 }
