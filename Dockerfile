@@ -7,6 +7,11 @@ RUN mvn -q clean package -DskipTests
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
+# poppler-utils (pdftoppm/pdfinfo) renders PDF pages to images in a native
+# subprocess instead of the JVM heap — much lower memory overhead than
+# PDFBox's in-process Java2D rendering, which was OOMing on Render's free tier.
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE 8080
 # Render's free tier gives the container ~512MB total. The JVM's container-aware

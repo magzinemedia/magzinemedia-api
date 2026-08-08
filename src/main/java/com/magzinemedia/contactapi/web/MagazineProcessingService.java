@@ -2,50 +2,36 @@ package com.magzinemedia.contactapi.web;
 
 import com.magzinemedia.contactapi.model.Magazine;
 import com.magzinemedia.contactapi.repository.MagazineRepository;
-import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.rendering.ImageType;
-import org.apache.pdfbox.rendering.PDFRenderer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
-import javax.imageio.IIOImage;
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import javax.imageio.stream.ImageOutputStream;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @Service
 public class MagazineProcessingService {
 
     private static final Logger log = LoggerFactory.getLogger(MagazineProcessingService.class);
-    // Trimmed down from 200 — Render's free tier has very little heap, and
-    // rendering happens one page at a time anyway so this is a straight
-    // safety margin against the OutOfMemoryError observed at 200 DPI.
-    private static final float DPI = 150f;
-    private static final float JPEG_QUALITY = 0.85f;
-    // Bounds a single page's render time. Client-side pdf.js was observed
-    // (this session, live testing) to hang indefinitely on certain page
-    // content in a real magazine PDF — PDFBox could plausibly hit the same
-    // pathological content. Without a bound, one bad page leaves the
-    // magazine stuck in PROCESSING forever instead of failing visibly.
+    // Rendering via PDFBox (in-JVM) was hitting OutOfMemoryError on Render's
+    // free tier — each page's BufferedImage + Java2D rendering pipeline was
+    // too much for the available heap. pdftoppm (poppler-utils) renders each
+    // page in a native subprocess that releases all its memory back to the OS
+    // the instant it exits, sidestepping JVM heap/GC pressure entirely.
+    private static final int DPI = 150;
+    private static final int JPEG_QUALITY = 85;
     private static final long PAGE_RENDER_TIMEOUT_SECONDS = 45;
+    private static final Pattern PAGES_PATTERN = Pattern.compile("(?m)^Pages:\\s*(\\d+)\\s*$");
 
     private final MagazineRepository magazineRepository;
     private final R2StorageService r2StorageService;
@@ -63,20 +49,15 @@ public class MagazineProcessingService {
         }
         Magazine magazine = maybeMagazine.get();
 
-        Path tempFile = null;
+        Path workDir = null;
         try {
+            workDir = Files.createTempDirectory("magazine-" + magazineId + "-");
+            Path pdfFile = workDir.resolve("source.pdf");
             // Build the path without creating the file — ResponseTransformer.toFile()
-            // in this SDK version always opens with CREATE_NEW and throws if the
-            // target already exists, so Files.createTempFile() (which creates it
-            // up front) made every download fail immediately.
-            tempFile = Files.createTempDirectory("magazine-" + magazineId + "-")
-                .resolve("source.pdf");
-            // Stream to disk rather than loading into a byte[] — the source
-            // PDFs here run 30-40MB and buffering the whole thing in heap was
-            // enough to throw OutOfMemoryError on Render's free-tier memory budget.
-            r2StorageService.downloadToFile(magazine.getPdfUrl(), tempFile);
+            // always opens with CREATE_NEW and throws if the target already exists.
+            r2StorageService.downloadToFile(magazine.getPdfUrl(), pdfFile);
 
-            List<String> pageImageUrls = renderPagesToR2(magazineId, tempFile.toFile());
+            List<String> pageImageUrls = renderPagesToR2(magazineId, pdfFile, workDir);
 
             magazine.setPageImageUrls(pageImageUrls);
             magazine.setStatus(Magazine.Status.READY);
@@ -84,88 +65,110 @@ public class MagazineProcessingService {
             log.info("Magazine {} processed successfully: {} pages", magazineId, pageImageUrls.size());
         } catch (Throwable t) {
             // Catches Throwable, not just Exception — OutOfMemoryError is an
-            // Error, not an Exception, and previously slipped past this catch
-            // block entirely, leaving the row stuck in PROCESSING forever.
+            // Error, not an Exception, and previously slipped past a narrower
+            // catch block entirely, leaving the row stuck in PROCESSING forever.
             log.warn("Failed to process magazine {}: {}", magazineId, t.getMessage());
             magazine.setStatus(Magazine.Status.FAILED);
             magazineRepository.save(magazine);
         } finally {
-            if (tempFile != null) {
-                try {
-                    Files.deleteIfExists(tempFile);
-                    Files.deleteIfExists(tempFile.getParent());
-                } catch (Exception e) {
-                    log.warn("Failed to delete temp file {}: {}", tempFile, e.getMessage());
-                }
-            }
+            deleteRecursively(workDir);
         }
     }
 
-    private List<String> renderPagesToR2(Long magazineId, File pdfFile) throws Exception {
+    private List<String> renderPagesToR2(Long magazineId, Path pdfFile, Path workDir) throws Exception {
+        int pageCount = readPageCount(pdfFile);
+        log.info("Magazine {}: starting render of {} pages", magazineId, pageCount);
+
         List<String> urls = new ArrayList<>();
-        ExecutorService renderExecutor = Executors.newSingleThreadExecutor();
+        for (int page = 1; page <= pageCount; page++) {
+            byte[] jpegBytes = renderPageWithTimeout(pdfFile, workDir, page, magazineId);
 
-        try (PDDocument document = Loader.loadPDF(pdfFile)) {
-            PDFRenderer renderer = new PDFRenderer(document);
-            int pageCount = document.getNumberOfPages();
-            log.info("Magazine {}: starting render of {} pages", magazineId, pageCount);
-
-            for (int i = 0; i < pageCount; i++) {
-                BufferedImage image = renderPageWithTimeout(renderExecutor, renderer, i, magazineId);
-                byte[] jpegBytes = toJpeg(image);
-                image.flush();
-
-                String key = "pages/" + magazineId + "/" + (i + 1) + ".jpg";
-                urls.add(r2StorageService.uploadBytes(key, jpegBytes, "image/jpeg"));
-                log.info("Magazine {}: rendered page {}/{}", magazineId, i + 1, pageCount);
-
-                // Render's free tier gives the JVM very little heap. A page's
-                // BufferedImage can be tens of MB and the next page's render
-                // starts immediately — nudge the collector so it's reclaimed
-                // before that allocation rather than relying on GC to keep up.
-                System.gc();
-            }
-        } finally {
-            renderExecutor.shutdownNow();
+            String key = "pages/" + magazineId + "/" + page + ".jpg";
+            urls.add(r2StorageService.uploadBytes(key, jpegBytes, "image/jpeg"));
+            log.info("Magazine {}: rendered page {}/{}", magazineId, page, pageCount);
         }
 
         return urls;
     }
 
-    private BufferedImage renderPageWithTimeout(
-        ExecutorService executor,
-        PDFRenderer renderer,
-        int pageIndex,
-        Long magazineId
-    ) throws Exception {
-        Callable<BufferedImage> renderTask = () -> renderer.renderImageWithDPI(pageIndex, DPI, ImageType.RGB);
-        Future<BufferedImage> future = executor.submit(renderTask);
+    private int readPageCount(Path pdfFile) throws Exception {
+        Process process = new ProcessBuilder("pdfinfo", pdfFile.toString())
+            .redirectErrorStream(true)
+            .start();
 
+        boolean finished = process.waitFor(30, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            throw new RuntimeException("pdfinfo timed out reading " + pdfFile.getFileName());
+        }
+        String output = readAll(process);
+        if (process.exitValue() != 0) {
+            throw new RuntimeException("pdfinfo failed (exit " + process.exitValue() + "): " + output);
+        }
+
+        Matcher matcher = PAGES_PATTERN.matcher(output);
+        if (!matcher.find()) {
+            throw new RuntimeException("Could not determine page count from pdfinfo output: " + output);
+        }
+        return Integer.parseInt(matcher.group(1));
+    }
+
+    private byte[] renderPageWithTimeout(Path pdfFile, Path workDir, int page, Long magazineId) throws Exception {
+        Path pageDir = Files.createTempDirectory(workDir, "page-" + page + "-");
         try {
-            return future.get(PAGE_RENDER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (TimeoutException e) {
-            future.cancel(true);
-            throw new TimeoutException(
-                "Magazine " + magazineId + " page " + (pageIndex + 1) + " took longer than "
-                    + PAGE_RENDER_TIMEOUT_SECONDS + "s to render — aborting"
-            );
+            Process process = new ProcessBuilder(
+                "pdftoppm",
+                "-jpeg",
+                "-jpegopt", "quality=" + JPEG_QUALITY,
+                "-r", String.valueOf(DPI),
+                "-f", String.valueOf(page),
+                "-l", String.valueOf(page),
+                pdfFile.toString(),
+                pageDir.resolve("out").toString()
+            ).redirectErrorStream(true).start();
+
+            boolean finished = process.waitFor(PAGE_RENDER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                throw new RuntimeException(
+                    "Magazine " + magazineId + " page " + page + " took longer than "
+                        + PAGE_RENDER_TIMEOUT_SECONDS + "s to render — aborting"
+                );
+            }
+            String output = readAll(process);
+            if (process.exitValue() != 0) {
+                throw new RuntimeException("pdftoppm failed on page " + page + " (exit " + process.exitValue() + "): " + output);
+            }
+
+            try (Stream<Path> files = Files.list(pageDir)) {
+                Path rendered = files.findFirst()
+                    .orElseThrow(() -> new RuntimeException("pdftoppm produced no output for page " + page));
+                return Files.readAllBytes(rendered);
+            }
+        } finally {
+            deleteRecursively(pageDir);
         }
     }
 
-    private byte[] toJpeg(BufferedImage image) throws Exception {
-        ImageWriter writer = ImageIO.getImageWritersByFormatName("jpg").next();
-        ImageWriteParam param = writer.getDefaultWriteParam();
-        param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-        param.setCompressionQuality(JPEG_QUALITY);
+    private String readAll(Process process) throws Exception {
+        return new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    }
 
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ImageOutputStream ios = ImageIO.createImageOutputStream(baos)) {
-            writer.setOutput(ios);
-            writer.write(null, new IIOImage(image, null, null), param);
-        } finally {
-            writer.dispose();
+    private void deleteRecursively(Path dir) {
+        if (dir == null || !Files.exists(dir)) {
+            return;
         }
-
-        return baos.toByteArray();
+        try (Stream<Path> paths = Files.walk(dir)) {
+            paths.sorted((a, b) -> b.getNameCount() - a.getNameCount())
+                .forEach(p -> {
+                    try {
+                        Files.deleteIfExists(p);
+                    } catch (Exception e) {
+                        log.warn("Failed to delete {}: {}", p, e.getMessage());
+                    }
+                });
+        } catch (Exception e) {
+            log.warn("Failed to clean up temp directory {}: {}", dir, e.getMessage());
+        }
     }
 }
