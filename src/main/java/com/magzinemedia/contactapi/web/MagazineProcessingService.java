@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
-import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -27,9 +26,11 @@ public class MagazineProcessingService {
     // free tier — each page's BufferedImage + Java2D rendering pipeline was
     // too much for the available heap. pdftoppm (poppler-utils) renders each
     // page in a native subprocess that releases all its memory back to the OS
-    // the instant it exits, sidestepping JVM heap/GC pressure entirely.
-    private static final int DPI = 150;
-    private static final int JPEG_QUALITY = 85;
+    // the instant it exits, sidestepping JVM heap/GC pressure entirely — which
+    // is why DPI can be pushed much higher than the old JVM-bound renderer
+    // could safely handle (needed for the reader's up-to-3x zoom to stay sharp).
+    private static final int DPI = 220;
+    private static final int JPEG_QUALITY = 90;
     private static final long PAGE_RENDER_TIMEOUT_SECONDS = 45;
     private static final Pattern PAGES_PATTERN = Pattern.compile("(?m)^Pages:\\s*(\\d+)\\s*$");
 
